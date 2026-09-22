@@ -1,0 +1,9 @@
+add_llvm_pass_executable(MyApp
+    SOURCES
+        main.cpp
+        Algebraic.cpp
+        ConstantFolding.cpp
+        ConstantPropagation.cpp
+        DeadCodeElimination.cpp
+        StrengthReduction.cpp
+)
