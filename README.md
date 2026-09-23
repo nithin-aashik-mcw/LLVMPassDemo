@@ -8,7 +8,7 @@ executable — so you can see each pass's effect end to end.
 
 ## Layout
 
-```
+```text
 .
 ├── CMakeLists.txt              top-level build: finds LLVM, wires up both subdirs
 ├── cmake/
@@ -95,6 +95,38 @@ cmake -S . -B build -DLLVM_DIR=/usr/local/lib/cmake/llvm
 Use a different build directory name if you want multiple side-by-side
 configurations, e.g. `cmake -S . -B build-debug -DCMAKE_BUILD_TYPE=Debug`.
 
+#### Choosing which passes run on `MyApp`
+
+Each custom pass has a CMake option (all `ON` by default) that controls
+whether it is included in the `opt -passes=` pipeline applied to the demo
+workload:
+
+| Option            | Pass       |
+|-------------------|------------|
+| `ENABLE_A_PASS`   | `a-pass`   |
+| `ENABLE_CF_PASS`  | `cf-pass`  |
+| `ENABLE_CP_PASS`  | `cp-pass`  |
+| `ENABLE_DCE_PASS` | `dce-pass` |
+| `ENABLE_SR_PASS`  | `sr-pass`  |
+
+```bash
+# Everything except dead code elimination
+cmake -S . -B build -DENABLE_DCE_PASS=OFF
+
+# Only strength reduction
+cmake -S . -B build -DENABLE_A_PASS=OFF -DENABLE_CF_PASS=OFF \
+      -DENABLE_CP_PASS=OFF -DENABLE_DCE_PASS=OFF
+```
+
+Configure prints the resulting pipeline, e.g.
+`-- Custom pass pipeline: a-pass,cf-pass,cp-pass,dce-pass,sr-pass`. Enabled
+passes always run in that fixed order. If every option is `OFF`, `opt` is
+run with no `-passes=` flag and the IR passes through unchanged.
+
+These options only affect the `MyApp` pipeline. `CustomPlugin.so` is built
+with all five passes either way. The options are cached, so re-run
+`cmake -S . -B build -D...=ON` to turn a pass back on.
+
 ### 2. Build
 
 Any of these build **everything** (`CustomPlugin.so` and `MyApp`):
@@ -128,13 +160,25 @@ rm -rf build && cmake -S . -B build && cmake --build build   # full reconfigure
 
 This runs the plugin-optimized versions of `algrbraic`, `constantFolding`,
 `constantPropagation`, `deadCodeElimination`, and `strengthReduction`. You
-can also inspect the intermediate IR CMake generated along the way:
+can also inspect the intermediate files CMake generated along the way:
 
+```text
+build/llvm-ir/MyApp/<Name>.ll        # C++ → LLVM IR (unoptimized, -O0 with optnone disabled)
+build/llvm-ir/MyApp/<Name>.opt.ll    # after CustomPlugin.so's passes
+build/src/MyApp.dir/<Name>.o         # compiled object linked into MyApp
 ```
-build/src/llvm-ir/MyApp/<Name>.ll        # C++ → LLVM IR (unoptimized, -O0 with optnone disabled)
-build/src/llvm-ir/MyApp/<Name>.opt.ll    # after CustomPlugin.so's passes
-build/src/llvm-ir/MyApp/<Name>.o         # compiled object
+
+Diffing the two IR files is the quickest way to see what the passes did:
+
+```bash
+diff build/llvm-ir/MyApp/StrengthReduction.ll build/llvm-ir/MyApp/StrengthReduction.opt.ll
 ```
+
+While `opt` runs, each pass also writes a log to stderr, so it shows up in
+the build output. The log has a green header line for every function the
+pass visits (`[N] StrengthReductionPass : _Z17strengthReductionv`) and a
+blue `old  ->  new` line for every rewrite. The macros that print these
+(`LOG_PASS_FUNCTION` and `LOG_INFO`) are in `llvm-pass/include/util.h`.
 
 ## Running the passes manually with `opt`
 
@@ -163,13 +207,56 @@ opt -load-pass-plugin=build/llvm-pass/CustomPlugin.so -passes=dce-pass,cp-pass,c
 
 ### Registered pass names
 
-| Name in `-passes=` | Source                                   | What it does                                            |
-|---------------------|-------------------------------------------|-----------------------------------------------------------|
-| `a-pass`             | `llvm-pass/src/Algebraic.cpp`             | Algebraic identity simplification (`x/x`, `x-x`, ...)     |
-| `cf-pass`            | `llvm-pass/src/ConstantFolding.cpp`       | Constant folding                                           |
-| `cp-pass`            | `llvm-pass/src/ConstantPropagation.cpp`   | Constant / copy propagation                                 |
-| `dce-pass`           | `llvm-pass/src/DeadCodeElimination.cpp`   | Dead / redundant code elimination                            |
-| `sr-pass`            | `llvm-pass/src/StrengthReduction.cpp`     | Strength reduction (`x * 2^n` → `x << n`)                     |
+| Name in `-passes=` | Source                                  | What it does                                          |
+|--------------------|-----------------------------------------|-------------------------------------------------------|
+| `a-pass`           | `llvm-pass/src/Algebraic.cpp`           | Algebraic identity simplification (`x/x`, `x-x`, ...) |
+| `cf-pass`          | `llvm-pass/src/ConstantFolding.cpp`     | Constant folding                                      |
+| `cp-pass`          | `llvm-pass/src/ConstantPropagation.cpp` | Constant / copy propagation                           |
+| `dce-pass`         | `llvm-pass/src/DeadCodeElimination.cpp` | Dead / redundant code elimination                     |
+| `sr-pass`          | `llvm-pass/src/StrengthReduction.cpp`   | Strength reduction (`x * 2^n` → `x << n`)             |
+
+All five are function passes that work on integer (and integer-vector)
+instructions. When a pass changes anything, it reports only CFG analyses as
+preserved. None of them add or remove basic blocks.
+
+### What each pass does
+
+- **`a-pass` (Algebraic)** replaces a binary operator with an operand or a
+  constant when an identity applies:
+  - `x+0`, `x-0`, `x*1`, `x/1`, `x|0`, `x^0`, `x<<0` (also `>>`) → `x`
+  - `x*0`, `x&0`, `0/x`, `0%x`, `x%1`, `0<<x` → `0`
+  - `x&-1` → `x`, and `x|-1` → `-1`
+  - With both operands the same value: `x-x`, `x^x`, `x%x` → `0`;
+    `x/x` → `1`; `x&x`, `x|x` → `x`
+
+  Two operands count as the same value if they are the same SSA value. They
+  also count if they are two simple loads of the same address in the same
+  block with nothing between them that writes memory. This is what lets
+  the pass catch `a/a` in unoptimized `-O0` IR. Chains such as
+  `(x-x)+y` → `y` collapse in a single sweep.
+- **`cf-pass` (Constant folding)** evaluates every instruction whose
+  operands are all constants, using LLVM's `ConstantFoldInstruction`, and
+  replaces it with the result. Instructions are visited in program order, so
+  each fold can feed its users.
+- **`cp-pass` (Constant / copy propagation)** works on local variables
+  (`alloca`s) whose address never escapes and that are only read and
+  written whole by simple loads and stores. Within each basic block, it
+  replaces a load with the value most recently stored to that variable
+  (either a constant or a copy of another value). It then folds any
+  instruction that has become constant as a result. Nothing is carried
+  across blocks.
+- **`dce-pass` (Dead code elimination)** removes trivially dead
+  instructions. It also removes variables that are written but never read,
+  along with all their stores. It repeats until nothing more can be
+  removed, because deleting one instruction can leave its operands dead.
+- **`sr-pass` (Strength reduction)** swaps expensive operations with a
+  power-of-two constant operand for cheaper ones:
+  - `x * 2^k` (either operand order) → `x << k`, keeping `nuw`/`nsw` where
+    they are still valid
+  - `x /u 2^k` → `x >>u k`
+  - `x %u 2^k` → `x & (2^k - 1)`
+  - `x /s 2^k` → a biased arithmetic shift that rounds toward zero, as
+    `sdiv` does (a single `ashr exact` when the `sdiv` is `exact`)
 
 > **Note:** every pass registers *both* a `registerPipelineParsingCallback`
 > (so it can be named explicitly in `-passes=`) **and** a
@@ -267,11 +354,16 @@ Say you want to add a pass named `my-pass` implemented by `MyPass`.
      `MyPass` fixes.
    - Declare and call it from `src/main.cpp` (`extern int myPass(); ...`).
    - Add the file to `src/CMakeLists.txt`'s `SOURCES` list.
-   - Add `my-pass` to the `-passes=` list in `cmake/LLVMCustomPass.cmake`
-     (order in that comma-separated list is the order the passes run in):
+   - Add an option for it in the top-level `CMakeLists.txt`, next to the
+     existing `ENABLE_*_PASS` options. The order of the `list(APPEND ...)`
+     blocks is the order the passes run in:
 
      ```cmake
-     -passes=a-pass,cf-pass,cp-pass,dce-pass,sr-pass,my-pass
+     option(ENABLE_MY_PASS "Run my pass (my-pass)" ON)
+     # ...
+     if(ENABLE_MY_PASS)
+         list(APPEND LLVM_CUSTOM_PASSES my-pass)
+     endif()
      ```
 
 6. **Reconfigure and rebuild** (new source files require a re-run of cmake):
@@ -284,7 +376,7 @@ Say you want to add a pass named `my-pass` implemented by `MyPass`.
 7. **Verify** it standalone before relying on the full pipeline:
 
    ```bash
-   opt -load-pass-plugin=build/llvm-pass/CustomPlugin.so -passes=my-pass src/MyPass.ll -S -o -
+   opt -load-pass-plugin=build/llvm-pass/CustomPlugin.so -passes=my-pass build/llvm-ir/MyApp/MyPass.ll -S -o -
    ```
 
 Steps 1–4 are required for the pass to exist at all. Step 4's ordering in
