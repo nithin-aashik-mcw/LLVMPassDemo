@@ -7,8 +7,20 @@ execute_process(
 function(add_llvm_pass_executable TARGET)
     cmake_parse_arguments(ARG "" "" "SOURCES" ${ARGN})
 
-    set(GENERATED_DIR ${CMAKE_CURRENT_BINARY_DIR}/llvm-ir/${TARGET})
+    set(GENERATED_DIR ${CMAKE_BINARY_DIR}/llvm-ir/${TARGET})
     file(MAKE_DIRECTORY ${GENERATED_DIR})
+
+    # Ninja creates output directories on its own, but Makefiles don't.
+    set(OBJ_DIR ${CMAKE_CURRENT_BINARY_DIR}/${TARGET}.dir)
+    file(MAKE_DIRECTORY ${OBJ_DIR})
+
+    # LLVM_CUSTOM_PASS_PIPELINE comes from the ENABLE_*_PASS options in the
+    # top-level CMakeLists.txt. With every pass disabled, opt runs with no
+    # -passes flag and just round-trips the IR.
+    set(PASSES_ARG)
+    if(LLVM_CUSTOM_PASS_PIPELINE)
+        set(PASSES_ARG -passes=${LLVM_CUSTOM_PASS_PIPELINE})
+    endif()
 
     set(OBJECTS)
 
@@ -17,7 +29,7 @@ function(add_llvm_pass_executable TARGET)
 
         set(IR_FILE ${GENERATED_DIR}/${NAME}.ll)
         set(OPT_IR_FILE ${GENERATED_DIR}/${NAME}.opt.ll)
-        set(OBJ_FILE ${GENERATED_DIR}/${NAME}.o)
+        set(OBJ_FILE ${OBJ_DIR}/${NAME}.o)
 
         # C++ → LLVM IR
         add_custom_command(
@@ -42,7 +54,7 @@ function(add_llvm_pass_executable TARGET)
             COMMAND
                 ${LLVM_TOOLS_BINARY_DIR}/opt
                 -load-pass-plugin=$<TARGET_FILE:CustomPlugin>
-                -passes=a-pass,cf-pass,cp-pass,dce-pass,sr-pass
+                ${PASSES_ARG}
                 ${IR_FILE}
                 -S
                 -o ${OPT_IR_FILE}
