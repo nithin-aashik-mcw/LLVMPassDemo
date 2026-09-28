@@ -1,15 +1,20 @@
 #pragma once
 
+#include "llvm/IR/Value.h"
 #include "llvm/Support/raw_ostream.h"
 
 inline int PassLogCount = 0;
 
-#define LOG_PASS_FUNCTION(Label, FuncName)                                  \
-    do {                                                                    \
-        llvm::errs().changeColor(llvm::raw_ostream::GREEN, /*Bold=*/true)   \
-            << "[" << ++PassLogCount << "] " << (Label) << " : ";           \
-        llvm::errs().changeColor(llvm::raw_ostream::GREEN) << (FuncName);   \
-        llvm::errs().resetColor() << "\n";                                  \
+inline bool isInstruction(const llvm::Value *V, unsigned Opcode) {
+    return V->getValueID() == llvm::Value::InstructionVal + Opcode;
+}
+
+#define LOG_PASS_FUNCTION(Label, FuncName)                                                         \
+    do {                                                                                           \
+        llvm::errs().changeColor(llvm::raw_ostream::GREEN, /*Bold=*/true)                          \
+            << "[" << ++PassLogCount << "] " << (Label) << " : ";                                  \
+        llvm::errs().changeColor(llvm::raw_ostream::GREEN) << (FuncName);                          \
+        llvm::errs().resetColor() << "\n";                                                         \
     } while (0)
 
 namespace detail {
@@ -24,8 +29,7 @@ struct ColorLogger {
     ~ColorLogger() { OS.resetColor(); }
 };
 
-template <typename T>
-inline llvm::raw_ostream &operator<<(ColorLogger &&Logger, const T &Val) {
+template <typename T> inline llvm::raw_ostream &operator<<(ColorLogger &&Logger, const T &Val) {
     return Logger.OS << Val;
 }
 
