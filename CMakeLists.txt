@@ -38,6 +38,8 @@ else()
     message(STATUS "Custom pass pipeline: (none, all ENABLE_*_PASS options are OFF)")
 endif()
 
+add_subdirectory(mat-mul)
+
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake")
 include(LLVMCustomPass)
 

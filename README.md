@@ -6,6 +6,8 @@ demo app that shows what each one does.
 - `llvm-pass/` builds the plugin, `CustomPlugin.so`.
 - `src/` holds small C++ functions written to trigger each pass. At build time
   they are compiled to LLVM IR, run through the plugin, and linked into `MyApp`.
+- `mat-mul/` is a separate AVX2/OpenMP matrix multiply benchmark. It is not
+  related to the passes and is built as a normal executable.
 
 ## Requirements
 
@@ -74,6 +76,18 @@ loading the plugin with `-O2` runs all five as well.
    `ENABLE_..._PASS` option in the top-level `CMakeLists.txt`.
 
 Then rerun `cmake -S . -B build` and build.
+
+## Matrix multiply
+
+`mat-mul` multiplies two random N x N float matrices and prints the time taken.
+It uses a cache-tiled AVX2/FMA kernel and runs on several threads with OpenMP.
+It is built with `-O3 -march=native -fopenmp`, so it needs a CPU with AVX2 and
+FMA, and the binary only runs on machines like the one that built it.
+
+```bash
+cmake --build build --target mat-mul
+./build/mat-mul/mat-mul 2048
+```
 
 ## Code style
 
